@@ -1,0 +1,76 @@
+# ─── Secrets & Environment ───────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+
+# ─── Cloned Reference Repos (not our code) ───────────────────────
+TradingAgents/
+ai-hedge-fund/
+market-briefing-bot/
+
+# ─── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.pyc
+celerybeat-schedule
+celerybeat.pid
+
+# ─── Node / Frontend ─────────────────────────────────────────────
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── Docker volumes / runtime data ──────────────────────────────
+infrastructure/postgres/data/
+infrastructure/redis/data/
+infrastructure/minio/data/
+*.sqlite3
+*.db
+
+# ─── ML / Data artifacts ─────────────────────────────────────────
+mlruns/
+*.pkl
+*.joblib
+*.h5
+*.parquet
+*.csv.gz
+data/raw/
+data/cache/
+
+# ─── Jupyter ─────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ─── OS ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ─── IDE ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+
+# ─── Claude Code settings ────────────────────────────────────────
+.claude/
+quant-platform/.claude/

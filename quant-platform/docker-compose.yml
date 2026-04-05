@@ -1,0 +1,569 @@
+version: '3.9'
+
+# ============================================================
+# QuantLab Platform - Enterprise Quant Asset Management System
+# Inspired by: Two Sigma, Citadel, AQR, Man AHL, WorldQuant
+# ============================================================
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-common-healthcheck: &common-healthcheck
+  interval: 15s
+  timeout: 10s
+  retries: 5
+  start_period: 30s
+
+services:
+
+  # ============================================================
+  # INFRASTRUCTURE LAYER
+  # ============================================================
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: quant_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quantpass}
+      POSTGRES_DB: ${POSTGRES_DB:-quantdb}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quant} -d ${POSTGRES_DB:-quantdb}"]
+      <<: *common-healthcheck
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: quant_redis
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *common-healthcheck
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.0
+    container_name: quant_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      <<: *common-healthcheck
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: quant_kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      <<: *common-healthcheck
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: quant_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      <<: *common-healthcheck
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # CORE API & WORKERS
+  # ============================================================
+
+  backend:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: quant_backend
+    environment:
+      <<: *backend-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --workers 1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      <<: *common-healthcheck
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  worker-backtest:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: quant_worker_backtest
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./services/backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app worker -Q backtests --loglevel=info --concurrency=4 -n backtest@%h
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  worker-research:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: quant_worker_research
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./services/backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app worker -Q research --loglevel=info --concurrency=2 -n research@%h
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  worker-data:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: quant_worker_data
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./services/backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app worker -Q data --loglevel=info --concurrency=2 -n data@%h
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  beat:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: quant_beat
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./services/backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  flower:
+    build:
+      context: ./services/backend
+      dockerfile: Dockerfile
+    container_name: quant_flower
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      FLOWER_BASIC_AUTH: ${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    command: celery -A app.workers.celery_app flower --port=5555
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # FRONTEND
+  # ============================================================
+
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    container_name: quant_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./services/frontend/src:/app/src
+      - ./services/frontend/public:/app/public
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # DATA PIPELINE TEAM
+  # Market data ingestion: KOSPI / KOSDAQ / US stocks
+  # ============================================================
+
+  data-pipeline:
+    build:
+      context: ./services/data-pipeline
+      dockerfile: Dockerfile
+    container_name: quant_data_pipeline
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./services/data-pipeline:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # STRATEGY RESEARCH TEAM
+  # Automated strategy generation + testing loop
+  # ============================================================
+
+  strategy-lab:
+    build:
+      context: ./services/strategy-lab
+      dockerfile: Dockerfile
+    container_name: quant_strategy_lab
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      BACKEND_URL: http://backend:8000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./services/strategy-lab:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # PAPER RESEARCH TEAM
+  # arXiv / SSRN crawler + AI-powered analysis
+  # ============================================================
+
+  paper-research:
+    build:
+      context: ./services/paper-research
+      dockerfile: Dockerfile
+    container_name: quant_paper_research
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./services/paper-research:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # AGENTIC TRADING TEAM
+  # Multi-agent AI: Macro + Micro + News + Technical + Sentiment
+  # ============================================================
+
+  agentic-trading:
+    build:
+      context: ./services/agentic-trading
+      dockerfile: Dockerfile
+    container_name: quant_agentic_trading
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BACKEND_URL: http://backend:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./services/agentic-trading:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # CEO AGENT
+  # 전략팀 경쟁 평가 + 승자 칭찬. 매주 금요일 17시 실행
+  # ============================================================
+
+  ceo-agent:
+    build:
+      context: ./services/ceo-agent
+      dockerfile: Dockerfile
+    container_name: quant_ceo_agent
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./services/ceo-agent:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # RISK MANAGEMENT TEAM
+  # Portfolio risk monitoring, VaR, drawdown alerts
+  # ============================================================
+
+  risk-engine:
+    build:
+      context: ./services/risk-engine
+      dockerfile: Dockerfile
+    container_name: quant_risk_engine
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./services/risk-engine:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # ML / EXPERIMENT TRACKING
+  # MLflow for strategy versioning & performance tracking
+  # ============================================================
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    container_name: quant_mlflow
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      MLFLOW_ARTIFACTS_DESTINATION: s3://mlflow-artifacts
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      --artifacts-destination s3://mlflow-artifacts
+      --host 0.0.0.0
+      --port 5000
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # RESEARCH JUPYTER LAB
+  # Interactive research environment for quants
+  # ============================================================
+
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    container_name: quant_jupyter
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-quantlab2024}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./research/notebooks:/home/jovyan/notebooks
+      - ./research/data:/home/jovyan/data
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # MONITORING LAYER
+  # Grafana + Prometheus for system & strategy monitoring
+  # ============================================================
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: quant_prometheus
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: quant_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # NGINX REVERSE PROXY
+  # ============================================================
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: quant_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+# ============================================================
+# VOLUMES
+# ============================================================
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  kafka_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  minio_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ============================================================
+# NETWORKS
+# ============================================================
+
+networks:
+  quant-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

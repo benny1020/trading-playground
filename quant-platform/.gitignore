@@ -1,0 +1,36 @@
+# Secrets
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+celerybeat-schedule
+celerybeat.pid
+
+# Node
+node_modules/
+.next/
+out/
+
+# Docker runtime volumes
+infrastructure/postgres/data/
+infrastructure/redis/data/
+infrastructure/minio/data/
+
+# ML artifacts
+mlruns/
+*.pkl
+*.joblib
+*.h5
+*.parquet
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

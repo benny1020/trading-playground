@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuantLab Platform - Architecture Overview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0f1117; color: #e2e8f0; font-family: -apple-system, 'Segoe UI', sans-serif; }
+
+  .header {
+    background: #1a1d27;
+    border-bottom: 1px solid #2a2d3e;
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo { font-size: 22px; font-weight: 700; color: #fff; }
+  .logo span { color: #6366f1; }
+  .badge { background: #1e2035; border: 1px solid #6366f1; color: #818cf8; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .status-live { background: #052e16; border: 1px solid #16a34a; color: #4ade80; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; margin-left: auto; }
+  .dot { width: 6px; height: 6px; background: #4ade80; border-radius: 50%; display: inline-block; margin-right: 5px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .main { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 56px); }
+
+  .sidebar {
+    background: #1a1d27;
+    border-right: 1px solid #2a2d3e;
+    padding: 20px 0;
+  }
+  .sidebar-section { padding: 8px 16px; font-size: 10px; font-weight: 700; color: #4b5563; text-transform: uppercase; letter-spacing: 1px; margin-top: 16px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 20px; color: #9ca3af; font-size: 13px;
+    cursor: pointer; transition: all 0.15s; border-left: 3px solid transparent;
+  }
+  .nav-item:hover { background: #1e2035; color: #e2e8f0; }
+  .nav-item.active { background: #1e2035; color: #818cf8; border-left-color: #6366f1; }
+  .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+  .content { padding: 28px 32px; overflow-y: auto; }
+
+  .page-title { font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  .page-sub { font-size: 13px; color: #6b7280; margin-bottom: 24px; }
+
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+  .stat-card {
+    background: #1a1d27;
+    border: 1px solid #2a2d3e;
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .stat-label { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
+  .stat-value { font-size: 26px; font-weight: 700; color: #fff; }
+  .stat-change { font-size: 12px; margin-top: 4px; }
+  .pos { color: #4ade80; } .neg { color: #f87171; } .neu { color: #818cf8; }
+
+  .section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+  .card {
+    background: #1a1d27;
+    border: 1px solid #2a2d3e;
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .card-title { font-size: 13px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 16px; }
+
+  .chart-area { height: 180px; display: flex; align-items: flex-end; gap: 3px; }
+  .bar { flex: 1; background: linear-gradient(to top, #6366f1, #818cf8); border-radius: 3px 3px 0 0; opacity: 0.85; transition: opacity 0.15s; }
+  .bar:hover { opacity: 1; }
+
+  .equity-line { height: 180px; position: relative; overflow: hidden; }
+  .equity-line svg { width: 100%; height: 100%; }
+
+  .strategy-list { display: flex; flex-direction: column; gap: 8px; }
+  .strategy-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px;
+    background: #0f1117;
+    border: 1px solid #2a2d3e;
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .strategy-name { font-weight: 500; color: #e2e8f0; }
+  .strategy-meta { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .pill { padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .pill-blue { background: #1e1b4b; color: #818cf8; }
+  .pill-green { background: #052e16; color: #4ade80; }
+  .pill-yellow { background: #2d1f00; color: #fbbf24; }
+
+  .team-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+  .team-card {
+    background: #1a1d27;
+    border: 1px solid #2a2d3e;
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .team-icon { font-size: 28px; margin-bottom: 10px; }
+  .team-name { font-size: 14px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  .team-desc { font-size: 12px; color: #6b7280; line-height: 1.5; }
+  .team-status { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 11px; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .s-green { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+  .s-blue { background: #60a5fa; box-shadow: 0 0 6px #60a5fa; }
+  .s-yellow { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
+
+  .full-card { background: #1a1d27; border: 1px solid #2a2d3e; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .arch-row { display: flex; align-items: center; gap: 0; margin: 12px 0; flex-wrap: wrap; }
+  .arch-box {
+    background: #0f1117;
+    border: 1px solid #2a2d3e;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .arch-arrow { color: #4b5563; font-size: 18px; padding: 0 6px; }
+  .highlight { border-color: #6366f1; color: #818cf8; }
+  .highlight2 { border-color: #059669; color: #4ade80; }
+
+  .nav-tabs { display: flex; gap: 0; border-bottom: 1px solid #2a2d3e; margin-bottom: 20px; }
+  .nav-tab { padding: 10px 18px; font-size: 13px; cursor: pointer; color: #6b7280; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .nav-tab.active { color: #818cf8; border-bottom-color: #6366f1; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">Quant<span>Lab</span></div>
+  <div class="badge">Enterprise</div>
+  <div style="font-size:12px;color:#6b7280;margin-left:12px;">퀀트 자산운용 플랫폼</div>
+  <div class="status-live"><span class="dot"></span> Building...</div>
+</div>
+
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-section">Main</div>
+    <div class="nav-item active"><span class="nav-icon">📊</span> Dashboard</div>
+    <div class="nav-item"><span class="nav-icon">📈</span> Strategies</div>
+    <div class="nav-item"><span class="nav-icon">🔬</span> Backtests</div>
+    <div class="nav-item"><span class="nav-icon">📰</span> Research</div>
+    <div class="nav-item"><span class="nav-icon">⚡</span> Strategy Lab</div>
+
+    <div class="sidebar-section">Data</div>
+    <div class="nav-item"><span class="nav-icon">🇰🇷</span> KOSPI / KOSDAQ</div>
+    <div class="nav-item"><span class="nav-icon">🇺🇸</span> US Stocks</div>
+    <div class="nav-item"><span class="nav-icon">📡</span> Market Feed</div>
+
+    <div class="sidebar-section">Risk & Ops</div>
+    <div class="nav-item"><span class="nav-icon">🛡️</span> Risk Monitor</div>
+    <div class="nav-item"><span class="nav-icon">🧪</span> MLflow</div>
+    <div class="nav-item"><span class="nav-icon">📟</span> Celery Tasks</div>
+  </div>
+
+  <!-- Content -->
+  <div class="content">
+    <div class="nav-tabs">
+      <div class="nav-tab active">Overview</div>
+      <div class="nav-tab">Teams</div>
+      <div class="nav-tab">Architecture</div>
+      <div class="nav-tab">Services</div>
+    </div>
+
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
+      <div>
+        <div class="page-title">퀀트랩 플랫폼 대시보드</div>
+        <div class="page-sub">전략 연구 → 백테스팅 → 수익 창출 | KOSPI · KOSDAQ · US Stocks</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+        <button id="discoveryBtn" onclick="runDiscovery()" style="display:flex;align-items:center;gap:8px;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:9px 18px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 20px rgba(99,102,241,0.3);transition:all 0.2s">
+          ⚡ 전략 자동 발굴
+        </button>
+        <div id="discoveryStatus" style="font-size:11px;color:#6b7280">최신 논문 리서치 후 전략 자동 생성</div>
+      </div>
+    </div>
+    <script>
+    function runDiscovery() {
+      const btn = document.getElementById('discoveryBtn');
+      const status = document.getElementById('discoveryStatus');
+      btn.innerHTML = '<span style="animation:spin 1s linear infinite;display:inline-block">⟳</span> 리서치 중...';
+      btn.style.background = '#4338ca';
+      btn.disabled = true;
+      status.textContent = 'arXiv 논문 분석 → 전략 생성 → 백테스트 실행 중...';
+      status.style.color = '#818cf8';
+      setTimeout(() => {
+        btn.innerHTML = '✓ 완료!';
+        btn.style.background = '#16a34a';
+        btn.disabled = false;
+        status.textContent = '전략이 생성되고 백테스트가 시작됐어요';
+        status.style.color = '#4ade80';
+      }, 3000);
+    }
+    </script>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">등록 전략 수</div>
+        <div class="stat-value">5</div>
+        <div class="stat-change neu">+ 3 auto-generated</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">완료된 백테스트</div>
+        <div class="stat-value">0</div>
+        <div class="stat-change" style="color:#6b7280">Ready to run</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">최고 샤프 비율</div>
+        <div class="stat-value pos">—</div>
+        <div class="stat-change" style="color:#6b7280">Run backtest first</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">수집된 논문</div>
+        <div class="stat-value">0</div>
+        <div class="stat-change neu">arXiv 크롤링 예정</div>
+      </div>
+    </div>
+
+    <!-- Teams Section -->
+    <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:16px;">팀 구성 현황</div>
+    <div class="team-grid">
+      <div class="team-card">
+        <div class="team-icon">🔬</div>
+        <div class="team-name">Strategy Research Team</div>
+        <div class="team-desc">논문 기반 전략 아이디어 추출 · Claude AI 자동 전략 생성 · 전략 코드 생성</div>
+        <div class="team-status"><div class="status-dot s-blue"></div><span style="color:#60a5fa">Building</span></div>
+      </div>
+      <div class="team-card">
+        <div class="team-icon">⚙️</div>
+        <div class="team-name">Backtesting Team</div>
+        <div class="team-desc">KOSPI/KOSDAQ/US 백테스팅 엔진 · Sharpe/CAGR/MDD 분석 · 전략 성능 평가</div>
+        <div class="team-status"><div class="status-dot s-blue"></div><span style="color:#60a5fa">Building</span></div>
+      </div>
+      <div class="team-card">
+        <div class="team-icon">📰</div>
+        <div class="team-name">Paper Research Team</div>
+        <div class="team-desc">arXiv q-fin 자동 크롤링 · Agentic Trading 등 트렌드 논문 분석 · 주간 트렌드 리포트</div>
+        <div class="team-status"><div class="status-dot s-blue"></div><span style="color:#60a5fa">Building</span></div>
+      </div>
+      <div class="team-card">
+        <div class="team-icon">📊</div>
+        <div class="team-name">Data Pipeline Team</div>
+        <div class="team-desc">pykrx KOSPI/KOSDAQ 데이터 · yfinance US 데이터 · 일일 자동 갱신 · TimescaleDB</div>
+        <div class="team-status"><div class="status-dot s-blue"></div><span style="color:#60a5fa">Building</span></div>
+      </div>
+      <div class="team-card">
+        <div class="team-icon">🛡️</div>
+        <div class="team-name">Risk Management Team</div>
+        <div class="team-desc">VaR/CVaR 모니터링 · 최대 낙폭 알림 · 전략 상관관계 분석 · 포트폴리오 리스크</div>
+        <div class="team-status"><div class="status-dot s-blue"></div><span style="color:#60a5fa">Building</span></div>
+      </div>
+      <div class="team-card">
+        <div class="team-icon">🤖</div>
+        <div class="team-name">Strategy Lab (Auto)</div>
+        <div class="team-desc">논문→전략 자동화 루프 · Claude API 전략 생성 · MLflow 실험 추적 · 우수 전략 발굴</div>
+        <div class="team-status"><div class="status-dot s-green"></div><span style="color:#4ade80">Ready</span></div>
+      </div>
+    </div>
+
+    <!-- Architecture Flow -->
+    <div class="full-card">
+      <div class="card-title">전략 연구 → 수익 창출 파이프라인</div>
+      <div class="arch-row">
+        <div class="arch-box">📰 arXiv 논문</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box highlight">🤖 Claude AI 분석</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box">💡 전략 아이디어</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box highlight">⚙️ 백테스트 실행</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box">📊 성능 평가</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box highlight2">✅ 우수 전략 선별</div>
+      </div>
+      <div class="arch-row" style="margin-top:8px">
+        <div class="arch-box">🇰🇷 KOSPI 데이터</div>
+        <div class="arch-arrow">+</div>
+        <div class="arch-box">🇰🇷 KOSDAQ 데이터</div>
+        <div class="arch-arrow">+</div>
+        <div class="arch-box">🇺🇸 US 주식 데이터</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box highlight">🗄️ TimescaleDB</div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box">📈 백테스팅 엔진</div>
+      </div>
+    </div>
+
+    <!-- Strategies Preview -->
+    <div class="card">
+      <div class="card-title">기본 등록 전략 (DB seeded)</div>
+      <div class="strategy-list">
+        <div class="strategy-row">
+          <div>
+            <div class="strategy-name">SMA 골든크로스 (KOSPI)</div>
+            <div class="strategy-meta">20일/60일 이동평균 · KOSPI</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="pill pill-blue">SMA Crossover</span>
+            <span class="pill pill-yellow">KOSPI</span>
+          </div>
+        </div>
+        <div class="strategy-row">
+          <div>
+            <div class="strategy-name">RSI 평균회귀 (US)</div>
+            <div class="strategy-meta">RSI 30/70 구간 · US Stocks</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="pill pill-blue">Mean Reversion</span>
+            <span class="pill pill-blue">US</span>
+          </div>
+        </div>
+        <div class="strategy-row">
+          <div>
+            <div class="strategy-name">모멘텀 팩터 (전체)</div>
+            <div class="strategy-meta">12개월 수익률 상위 20% · 월별 리밸런싱</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="pill pill-blue">Momentum</span>
+            <span class="pill pill-green">ALL</span>
+          </div>
+        </div>
+        <div class="strategy-row">
+          <div>
+            <div class="strategy-name">볼린저밴드 (KOSDAQ)</div>
+            <div class="strategy-meta">20일/2σ 밴드 · KOSDAQ</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="pill pill-blue">Bollinger Band</span>
+            <span class="pill pill-yellow">KOSDAQ</span>
+          </div>
+        </div>
+        <div class="strategy-row">
+          <div>
+            <div class="strategy-name">이중 모멘텀 (Antonacci)</div>
+            <div class="strategy-meta">절대/상대 모멘텀 · US Stocks · 12개월 lookback</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="pill pill-blue">Dual Momentum</span>
+            <span class="pill pill-blue">US</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Services Grid -->
+    <div style="font-size:14px;font-weight:700;color:#fff;margin:24px 0 16px;">서비스 포트 현황</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">Frontend</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:3000</div>
+        <div style="font-size:11px;color:#818cf8">Next.js 14</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">Backend API</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:8000</div>
+        <div style="font-size:11px;color:#818cf8">FastAPI + Swagger</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">MLflow</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:5000</div>
+        <div style="font-size:11px;color:#818cf8">Experiment Tracking</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">Jupyter Lab</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:8888</div>
+        <div style="font-size:11px;color:#818cf8">Research Notebooks</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">Grafana</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:3001</div>
+        <div style="font-size:11px;color:#818cf8">Monitoring</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">Celery Flower</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:5555</div>
+        <div style="font-size:11px;color:#818cf8">Task Queue</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">MinIO</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:9001</div>
+        <div style="font-size:11px;color:#818cf8">Object Storage</div>
+      </div>
+      <div class="stat-card" style="padding:14px 16px">
+        <div style="font-size:11px;color:#6b7280">Prometheus</div>
+        <div style="font-size:15px;font-weight:700;color:#fff;margin:4px 0">localhost:9090</div>
+        <div style="font-size:11px;color:#818cf8">Metrics</div>
+      </div>
+    </div>
+
+    <div style="margin-top:32px;padding:16px;background:#1a1d27;border:1px solid #2a2d3e;border-radius:10px;font-size:12px;color:#6b7280">
+      <div style="color:#4ade80;font-weight:700;margin-bottom:8px">빌드 완료 후 시작 방법:</div>
+      <code style="color:#e2e8f0;background:#0f1117;padding:8px 12px;border-radius:6px;display:block;line-height:2">
+        cd quant-platform<br>
+        cp .env.example .env  # API 키 설정 (Anthropic 등)<br>
+        docker compose up -d   # 전체 서비스 시작<br>
+        # → http://localhost:3000 에서 QuantLab 대시보드 접속
+      </code>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

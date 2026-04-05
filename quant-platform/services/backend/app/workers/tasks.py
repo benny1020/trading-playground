@@ -200,6 +200,73 @@ def fetch_market_data(self, market: str = "ALL", start: str = "2020-01-01"):
 
 @celery_app.task(
     bind=True,
+    name="app.workers.tasks.run_factor_engine",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def run_factor_engine(self, market: str = "ALL"):
+    """
+    Scheduled task: Run factor engine for universe scoring.
+    Runs every Monday at 7am KST.
+    """
+    from app.services.factor_engine import factor_engine
+
+    db = SessionLocal()
+    try:
+        today = date.today().strftime("%Y-%m-%d")
+        logger.info(f"[FactorEngine] Starting factor calculation for {market}, date={today}")
+        scores = factor_engine.run(db, market=market, as_of_date=today)
+        n = len(scores) if scores is not None and not scores.empty else 0
+        logger.info(f"[FactorEngine] Completed: {n} stocks scored")
+        return {"status": "completed", "scored": n, "date": today}
+    except Exception as exc:
+        logger.error(f"[FactorEngine] Failed: {exc}\n{traceback.format_exc()}")
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="app.workers.tasks.run_portfolio_rebalance",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def run_portfolio_rebalance(self):
+    """
+    Scheduled task: Build portfolio and rebalance for all strategy teams.
+    Runs every Monday at 7:30am KST (after factor engine completes).
+    """
+    from app.services.factor_engine import portfolio_optimizer, rebalance_engine
+
+    TEAMS = ["quant_strategies", "ai_hedge_fund"]
+    db = SessionLocal()
+    try:
+        today = date.today().strftime("%Y-%m-%d")
+        results = {}
+        for team_id in TEAMS:
+            try:
+                weights = portfolio_optimizer.build_portfolio(db, team_id=team_id, as_of_date=today)
+                rebalance = rebalance_engine.rebalance(db, team_id=team_id)
+                results[team_id] = {
+                    "positions": len(weights),
+                    "summary": rebalance.get("summary", ""),
+                }
+                logger.info(f"[Rebalance] {team_id}: {len(weights)} positions")
+            except Exception as e:
+                logger.error(f"[Rebalance] Failed for {team_id}: {e}")
+                results[team_id] = {"error": str(e)}
+
+        return {"status": "completed", "results": results, "date": today}
+    except Exception as exc:
+        logger.error(f"[Rebalance] Task failed: {exc}\n{traceback.format_exc()}")
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
     name="app.workers.tasks.fetch_papers",
     max_retries=2,
     default_retry_delay=120,

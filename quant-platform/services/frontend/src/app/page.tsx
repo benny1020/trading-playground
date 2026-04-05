@@ -120,6 +120,7 @@ export default function DashboardPage() {
           {[
             { href: "/", label: "대시보드" },
             { href: "/company", label: "🏢 회사현황" },
+            { href: "/portfolio", label: "📊 포트폴리오" },
             { href: "/strategies", label: "전략" },
             { href: "/backtests", label: "백테스트" },
             { href: "/research", label: "리서치" },
@@ -184,7 +185,9 @@ export default function DashboardPage() {
                       }`}>{i + 1}</span>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm truncate">{team.team_name}</span>
+                          <Link href={`/teams/${team.team_id}`} className="font-medium text-sm truncate hover:text-blue-400 transition-colors">
+                            {team.team_name}
+                          </Link>
                           <span className={`text-xs px-1.5 py-0.5 rounded border ${typeColor[team.team_type] ?? "text-zinc-400 bg-zinc-800 border-zinc-700"}`}>
                             {team.team_type}
                           </span>

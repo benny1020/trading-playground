@@ -29,5 +29,17 @@ celery_app.conf.update(
             "schedule": crontab(hour=9, minute=0, day_of_week=1),
             "options": {"queue": "research"},
         },
+        # 매주 월요일 오전 — 전체 팩터 스코어 재계산
+        "run-factor-engine-weekly": {
+            "task": "app.workers.tasks.run_factor_engine",
+            "schedule": crontab(hour=7, minute=0, day_of_week=1),
+            "options": {"queue": "data"},
+        },
+        # 매주 월요일 오전 (팩터 엔진 후) — 포트폴리오 리밸런싱
+        "run-portfolio-rebalance-weekly": {
+            "task": "app.workers.tasks.run_portfolio_rebalance",
+            "schedule": crontab(hour=7, minute=30, day_of_week=1),
+            "options": {"queue": "backtest"},
+        },
     },
 )

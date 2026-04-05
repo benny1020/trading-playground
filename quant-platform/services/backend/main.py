@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, Base
 from app.routers import strategies, backtests, market_data, research
-from app.routers import company
+from app.routers import company, portfolio
 
 Base.metadata.create_all(bind=engine)
 
@@ -21,6 +21,7 @@ app.include_router(backtests.router, prefix="/api/backtests", tags=["Backtests"]
 app.include_router(market_data.router, prefix="/api/market-data", tags=["Market Data"])
 app.include_router(research.router, prefix="/api/research", tags=["Research"])
 app.include_router(company.router)
+app.include_router(portfolio.router)
 
 
 @app.get("/health")

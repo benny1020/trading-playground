@@ -82,6 +82,69 @@ export interface PriceData {
   volume: number;
 }
 
+// ── Portfolio / Factor Engine Types ──────────────────────────────────────────
+export interface FactorScore {
+  symbol: string;
+  name?: string;
+  sector?: string;
+  market: string;
+  composite_score: number;
+  rank: number;
+  momentum_12m1m: number | null;
+  momentum_3m: number | null;
+  low_vol: number | null;
+  value_proxy: number | null;
+  quality_proxy: number | null;
+  momentum_12m1m_rank: number;
+  momentum_3m_rank: number;
+  low_vol_rank: number;
+  value_proxy_rank: number;
+  quality_proxy_rank: number;
+  score_date: string;
+}
+
+export interface PortfolioPosition {
+  symbol: string;
+  name?: string;
+  sector?: string;
+  target_weight: number;
+  last_rebalanced: string | null;
+  composite_score: number | null;
+  factor_rank: number | null;
+  momentum_12m1m: number | null;
+  low_vol: number | null;
+  quality_proxy: number | null;
+}
+
+export interface RebalanceHistory {
+  id: number;
+  team_id: string;
+  team_name?: string;
+  rebalance_date: string;
+  trades: any[];
+  summary: string;
+  created_at: string;
+}
+
+export interface TeamMember {
+  id: number;
+  team_id: string;
+  team_name: string;
+  member_name: string;
+  role: string;
+  role_type: string;
+  description: string;
+  is_head: boolean;
+  is_ai_agent: boolean;
+  expertise_tags: string[];
+}
+
+export interface TeamWithMembers {
+  team_id: string;
+  team_name: string;
+  members: TeamMember[];
+}
+
 // API client
 export const api = {
   strategies: {
@@ -124,6 +187,22 @@ export const api = {
         max_papers: maxPapers ?? 30,
         auto_backtest: autoBacktest ?? true,
       }),
+  },
+  portfolio: {
+    factorScores: (market?: string, topN?: number) =>
+      axios.get(`${API_BASE}/api/portfolio/factor-scores${market ? `?market=${market}` : ""}${topN ? `&top_n=${topN}` : ""}`),
+    positions: (teamId: string) =>
+      axios.get(`${API_BASE}/api/portfolio/positions/${teamId}`),
+    allPositions: () =>
+      axios.get(`${API_BASE}/api/portfolio/positions`),
+    rebalanceHistory: (teamId: string) =>
+      axios.get(`${API_BASE}/api/portfolio/rebalance-history/${teamId}`),
+    runFactorEngine: (market?: string) =>
+      axios.post(`${API_BASE}/api/portfolio/run-factor-engine${market ? `?market=${market}` : ""}`),
+    teamMembers: () =>
+      axios.get<TeamWithMembers[]>(`${API_BASE}/api/portfolio/team-members`),
+    teamMembersByTeam: (teamId: string) =>
+      axios.get<TeamMember[]>(`${API_BASE}/api/portfolio/team-members/${teamId}`),
   },
   company: {
     leaderboard: () => axios.get(`${API_BASE}/api/company/leaderboard`),

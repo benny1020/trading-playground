@@ -125,4 +125,17 @@ export const api = {
         auto_backtest: autoBacktest ?? true,
       }),
   },
+  company: {
+    leaderboard: () => axios.get(`${API_BASE}/api/company/leaderboard`),
+    latestCompetition: () => axios.get(`${API_BASE}/api/company/competition/latest`),
+    competitionHistory: (limit = 10) =>
+      axios.get(`${API_BASE}/api/company/competition/history?limit=${limit}`),
+    tradeJournal: (market?: string, limit = 50) =>
+      axios.get(`${API_BASE}/api/company/trade-journal?limit=${limit}${market ? `&market=${market}` : ""}`),
+    tradeStats: () => axios.get(`${API_BASE}/api/company/trade-journal/stats`),
+    agentMemory: (agentId?: string, memoryType?: string) =>
+      axios.get(`${API_BASE}/api/company/agent-memory?limit=50${agentId ? `&agent_id=${agentId}` : ""}${memoryType ? `&memory_type=${memoryType}` : ""}`),
+    agenticSignals: (market?: string, limit = 30) =>
+      axios.get(`${API_BASE}/api/company/agentic-signals?limit=${limit}${market ? `&market=${market}` : ""}`),
+  },
 };

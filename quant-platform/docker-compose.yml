@@ -313,6 +313,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - ./services/strategy-lab:/app
+      - ./services/shared:/app/shared
     depends_on:
       postgres:
         condition: service_healthy
@@ -364,6 +365,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./services/agentic-trading:/app
+      - ./services/shared:/app/shared
     depends_on:
       postgres:
         condition: service_healthy
@@ -389,6 +391,7 @@ services:
       BACKEND_URL: http://backend:8000
     volumes:
       - ./services/ceo-agent:/app
+      - ./services/shared:/app/shared
     depends_on:
       postgres:
         condition: service_healthy

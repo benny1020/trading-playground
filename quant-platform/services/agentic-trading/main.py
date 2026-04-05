@@ -38,11 +38,21 @@ from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass, field
 
+import sys
 import httpx
 import feedparser
+import psycopg2
+import psycopg2.extras
 from sqlalchemy import create_engine, text
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
+
+sys.path.insert(0, "/app/shared")
+try:
+    from memory_manager import MemoryManager, TradeJournal
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
 
 load_dotenv()
 
@@ -564,6 +574,11 @@ class PortfolioManager:
 # ─────────────────────────────────────────────────────────────
 
 class AgenticTradingSystem:
+    """
+    Agentic Trading 팀.
+    과거 신호 정확도를 매번 확인하고, 잘 맞춘 에이전트를 더 신뢰한다.
+    매매 일지를 통해 "지난번 KOSPI BUY 신호가 +3.2% 수익이었음"을 기억한다.
+    """
     MARKETS = ["KOSPI", "KOSDAQ", "US"]
 
     def __init__(self):
@@ -592,6 +607,19 @@ class AgenticTradingSystem:
         self.risk_panel = RiskPanel(self.claude)
         self.portfolio_manager = PortfolioManager(self.claude)
 
+        # 기억 시스템
+        self.memory: dict[str, MemoryManager] = {}   # market별 메모리
+        self.journal: dict[str, TradeJournal] = {}   # market별 매매일지
+        if MEMORY_AVAILABLE:
+            try:
+                _db = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+                for market in self.MARKETS:
+                    self.memory[market] = MemoryManager(_db, f"agentic_{market.lower()}")
+                    self.journal[market] = TradeJournal(_db, f"agentic_{market.lower()}")
+                logger.info("기억 시스템 + 매매 일지 초기화 완료")
+            except Exception as e:
+                logger.warning(f"기억 시스템 초기화 실패: {e}")
+
     def run_analysis(self, markets: Optional[list] = None):
         if not markets:
             markets = self.MARKETS
@@ -615,6 +643,45 @@ class AgenticTradingSystem:
 
         logger.info(f"=== 분석 완료 | {len(results)}/{len(markets)} 시장 ===")
         return results
+
+    def _get_performance_context(self, market: str) -> str:
+        """
+        과거 매매 성과 + 기억을 컨텍스트 문자열로 조합.
+        Portfolio Manager 프롬프트에 주입됨.
+        """
+        lines = []
+
+        # 매매 일지에서 정확도 통계
+        journal = self.journal.get(market)
+        if journal:
+            perf = journal.build_performance_summary(market)
+            lines.append(perf)
+
+        # 기억에서 인사이트
+        mem = self.memory.get(market)
+        if mem:
+            ctx = mem.build_context_prompt(limit=8)
+            if ctx:
+                lines.append(ctx)
+
+        return "\n".join(lines) if lines else ""
+
+    def _close_open_trades(self, market: str, current_price: float):
+        """
+        5거래일 이상 된 오픈 포지션을 현재가로 자동 청산 처리.
+        실제 체결이 아닌 성과 기록 목적.
+        """
+        journal = self.journal.get(market)
+        if not journal:
+            return
+        from datetime import date, timedelta
+        open_trades = journal.get_open_trades(market)
+        cutoff = date.today() - timedelta(days=5)
+        for t in open_trades:
+            signal_date = t["signal_date"]
+            if str(signal_date) <= str(cutoff):
+                journal.close_trade(t["id"], exit_price=current_price)
+                logger.info(f"[{market}] 포지션 자동 청산: {t['signal_type']} @ {t['entry_price']} → {current_price}")
 
     def _analyze_market(self, market: str) -> FinalDecision:
         reports = []
@@ -656,8 +723,12 @@ class AgenticTradingSystem:
         # 4. Risk Panel
         risk_verdict = self.risk_panel.deliberate(bull_case, bear_case, market)
 
-        # 5. Portfolio Manager 최종 결정
-        decision = self.portfolio_manager.decide(reports, bull_case, bear_case, risk_verdict, market)
+        # 5. Portfolio Manager 최종 결정 (과거 성과 컨텍스트 주입)
+        perf_context = self._get_performance_context(market)
+        decision = self.portfolio_manager.decide(
+            reports, bull_case, bear_case, risk_verdict, market,
+            extra_context=perf_context,
+        )
         return decision
 
     def _save(self, decision: FinalDecision):
@@ -683,6 +754,33 @@ class AgenticTradingSystem:
                 conn.commit()
             except Exception as e:
                 logger.debug(f"저장 오류: {e}")
+
+        # 매매 일지에 신호 기록 (HOLD 제외)
+        if decision.signal not in ("HOLD",) and MEMORY_AVAILABLE:
+            journal = self.journal.get(decision.market)
+            if journal:
+                # 현재가 추정 (없으면 0 — 나중에 close_trade 시 계산)
+                journal.log_signal(
+                    market=decision.market,
+                    signal_type=decision.signal,
+                    confidence=decision.confidence,
+                    entry_price=0.0,  # 실제 체결가는 별도 업데이트 필요
+                    agent_breakdown=[{
+                        "analyst": r["analyst"],
+                        "signal": r["signal"],
+                        "confidence": r["confidence"],
+                    } for r in decision.all_reports],
+                )
+
+        # 기억에 이번 결정 인사이트 저장
+        mem = self.memory.get(decision.market)
+        if mem:
+            mem.remember_insight(
+                f"{decision.market} → {decision.signal} "
+                f"(확신도={decision.confidence:.0%}, 포지션={decision.position_size:.0%}): "
+                f"{decision.portfolio_manager_reasoning[:120]}",
+                importance=0.6,
+            )
 
     def _init_db(self):
         with engine.connect() as conn:

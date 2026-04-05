@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
+import sys
 import httpx
 import mlflow
 import pandas as pd
@@ -30,6 +31,16 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+
+# 공유 메모리 모듈 (volume-mounted)
+sys.path.insert(0, "/app/shared")
+try:
+    from memory_manager import MemoryManager
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+    logger_tmp = logging.getLogger("strategy-lab")
+    logger_tmp.warning("memory_manager not available")
 
 load_dotenv()
 
@@ -45,6 +56,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 
 engine = create_engine(DATABASE_URL)
+
+import psycopg2
+import psycopg2.extras
+
+def get_raw_db():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 # ============================================================
 # Strategy Idea Extraction
@@ -111,12 +128,29 @@ Return only valid JSON.
 
 
 class StrategyLab:
+    """
+    Strategy Lab 연구원.
+    매 사이클마다 자신의 과거 연구 기록을 먼저 읽고 시작한다.
+    실패한 전략은 반복하지 않는다. 성공 패턴은 강화한다.
+    """
+
     def __init__(self):
         self.client = httpx.Client(base_url=BACKEND_URL, timeout=60.0)
         self.anthropic_available = bool(ANTHROPIC_API_KEY)
         if self.anthropic_available:
             import anthropic
             self.anthropic = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        # 기억 시스템 초기화
+        self._memory_db = None
+        self.memory: MemoryManager = None
+        if MEMORY_AVAILABLE:
+            try:
+                self._memory_db = get_raw_db()
+                self.memory = MemoryManager(self._memory_db, "strategy_lab")
+                logger.info("Memory system initialized")
+            except Exception as e:
+                logger.warning(f"Memory init failed: {e}")
 
         try:
             mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -143,10 +177,23 @@ class StrategyLab:
             return [dict(row._mapping) for row in result]
 
     def extract_strategies_from_paper(self, paper: dict) -> list:
-        """Use Claude to extract trading strategies from a paper."""
+        """
+        논문에서 전략 추출.
+        과거에 뭐가 됐고 뭐가 안됐는지 기억을 컨텍스트로 주입한다.
+        실패한 전략 타입은 다시 제안하지 않도록 Claude에게 알려준다.
+        """
         if not self.anthropic_available:
             logger.info("No Anthropic API key - using rule-based extraction")
             return self._rule_based_extraction(paper)
+
+        # 과거 기억 로드 — 퀀트 리서처가 노트를 펼쳐보는 것처럼
+        memory_context = ""
+        bad_types = set()
+        if self.memory:
+            memory_context = self.memory.build_context_prompt(limit=10)
+            bad_types = self.memory.get_bad_strategy_types()
+            if bad_types:
+                memory_context += f"\n\n❌ 이미 시도했고 성과 없었던 전략 타입 (제안 금지): {', '.join(bad_types)}"
 
         try:
             prompt = STRATEGY_EXTRACTION_PROMPT.format(
@@ -154,6 +201,9 @@ class StrategyLab:
                 authors=paper.get("authors", "Unknown"),
                 abstract=paper.get("abstract", "")[:3000]
             )
+            # 기억 컨텍스트를 프롬프트 앞에 주입
+            if memory_context:
+                prompt = memory_context + "\n\n" + prompt
 
             message = self.anthropic.messages.create(
                 model="claude-haiku-4-5-20251001",
@@ -328,9 +378,42 @@ class StrategyLab:
             return False
         return (
             results.get("sharpe_ratio", 0) >= 0.8 and
-            results.get("cagr", 0) >= 0.05 and  # 5% CAGR minimum
-            abs(results.get("max_drawdown", 1)) <= 0.30  # Max 30% drawdown
+            results.get("cagr", 0) >= 0.05 and
+            abs(results.get("max_drawdown", 1)) <= 0.30
         )
+
+    def _save_result_to_memory(self, idea: dict, results: dict, paper_title: str):
+        """백테스트 결과를 기억에 저장. 다음 사이클에 활용된다."""
+        if not self.memory or not results:
+            return
+
+        sharpe = results.get("sharpe_ratio", 0)
+        cagr = results.get("cagr", 0)
+        mdd = results.get("max_drawdown", 0)
+        market = idea.get("applicable_markets", ["US"])[0]
+
+        self.memory.remember_strategy_result(
+            strategy_name=idea["strategy_name"],
+            strategy_type=idea.get("strategy_type", "unknown"),
+            market=market,
+            sharpe=sharpe,
+            cagr=cagr,
+            mdd=mdd,
+            source=paper_title[:80],
+        )
+
+        # 추가 인사이트: 좋은 전략이면 패턴 기록
+        if self.is_good_strategy(results):
+            self.memory.remember_insight(
+                f"{idea.get('strategy_type')} 전략이 {market}에서 효과적: "
+                f"Sharpe={sharpe:.2f}, 출처={paper_title[:60]}",
+                importance=0.9,
+            )
+        elif sharpe < 0.3:
+            self.memory.remember_warning(
+                f"{market}에서 '{idea.get('strategy_type')}' 전략 Sharpe={sharpe:.2f} — "
+                f"비슷한 접근은 재시도 불필요"
+            )
 
     def run_research_cycle(self):
         """Main research loop: papers → strategies → backtests → evaluate."""
@@ -361,6 +444,8 @@ class StrategyLab:
 
                 if results:
                     self.log_to_mlflow(idea["strategy_name"], idea, results)
+                    # 결과를 기억에 저장 (다음 사이클에 활용)
+                    self._save_result_to_memory(idea, results, paper["title"])
 
                     if self.is_good_strategy(results):
                         good_strategies.append({

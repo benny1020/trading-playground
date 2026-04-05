@@ -1,16 +1,13 @@
 """
 CEO Agent — QuantLab Capital
 ============================
-CEO는 모든 전략팀의 성과를 주기적으로 평가하고, 승자를 칭찬하며,
-팀 간 경쟁을 통해 최고의 전략을 선별한다.
+돈에 미친 CEO. 수익만이 목표다.
 
-역할:
-- 매주 금요일 장 마감 후 Competition Round 실행
-- 모든 활성 전략팀의 백테스트 결과를 수집
-- 복합 점수 (Sharpe×0.4 + CAGR×0.3 - |MDD|×0.3) 로 랭킹
-- 승자 팀에게 Claude API로 CEO 칭찬 메시지 생성
-- 저성과 팀에게 개선 권고
-- competition_rounds DB에 결과 저장
+매주 전략팀들의 성과를 냉정하게 평가한다.
+잘한 팀은 극찬하고, 못한 팀은 강하게 압박한다.
+과거 라운드 패턴을 기억해 평가 기준을 계속 높인다.
+
+"수익 못 내는 팀은 필요 없다. 우리는 퀀트 자산운용사다."
 """
 
 import os
@@ -20,11 +17,19 @@ import uuid
 from datetime import datetime, date, timedelta
 from typing import Optional
 
+import sys
 import anthropic
 import psycopg2
 import psycopg2.extras
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+sys.path.insert(0, "/app/shared")
+try:
+    from memory_manager import MemoryManager
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,79 +144,134 @@ def get_next_round_number(db) -> int:
 
 # ─── CEO Praise Generator ─────────────────────────────────────────────────────
 
+def get_ceo_memory(db) -> tuple[MemoryManager, str]:
+    """CEO의 과거 기억 로드. 누적 라운드 패턴 파악에 사용."""
+    if not MEMORY_AVAILABLE:
+        return None, ""
+    try:
+        mem = MemoryManager(db, "ceo_agent")
+        ctx = mem.build_context_prompt(limit=10)
+        return mem, ctx
+    except Exception:
+        return None, ""
+
+
+def get_past_competition_context(db) -> str:
+    """과거 경쟁 히스토리 요약 — CEO가 패턴을 인식하는 데 사용."""
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT round_number, winner_team_id, winner_strategy,
+                   results, created_at
+            FROM competition_rounds
+            ORDER BY created_at DESC
+            LIMIT 5
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            return ""
+
+        lines = ["=== 과거 경쟁 히스토리 (최근 5라운드) ==="]
+        for r in rows:
+            results = r["results"] or []
+            top3 = results[:3] if isinstance(results, list) else []
+            lines.append(
+                f"  Round {r['round_number']} ({str(r['created_at'].date())}): "
+                f"우승={r['winner_team_id']} ({r['winner_strategy'][:40]})"
+            )
+        lines.append("=" * 40)
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def generate_ceo_message(
     winner: dict,
     all_results: list,
+    losers: list,
     round_num: int,
+    memory_context: str = "",
+    history_context: str = "",
 ) -> tuple[str, str]:
     """
-    Claude API를 사용해 CEO 칭찬 메시지와 전체 평가 노트 생성.
-    Returns (praise_for_winner, overall_notes)
+    돈에 미친 CEO 메시지 생성.
+    - 우승팀: 극찬 + 계속 밀어붙여라
+    - 하위팀: 강한 압박 + 구체적 개선 지시
+    - 기억 기반: 같은 팀이 반복 우승하면 더 높은 기준 요구
+    Returns (praise_for_winner, pressure_for_losers)
     """
     if not ANTHROPIC_API_KEY:
         praise = (
-            f"🏆 축하합니다! {winner['team_id']} 팀이 Round {round_num} 우승! "
-            f"Sharpe {winner['sharpe']:.2f}, CAGR {winner['cagr']:.1f}%의 뛰어난 성과입니다."
+            f"🏆 {winner['team_id']} 팀 Round {round_num} 우승! "
+            f"Sharpe {winner['sharpe']:.2f}, CAGR {winner['cagr']:.1f}%! 계속 이 기세로!"
         )
-        notes = "CEO 평가: ANTHROPIC_API_KEY 미설정으로 자동 평가 불가"
+        notes = f"하위 팀들: 수익 못 내면 팀 해체 검토. 다음 라운드까지 Sharpe 1.0 이상 목표."
         return praise, notes
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     rankings_text = "\n".join([
-        f"  {i+1}위. {r['team_id']} - {r['strategy_name']} "
-        f"(Sharpe: {r['sharpe']:.2f}, CAGR: {r['cagr']:.1f}%, MDD: {r['mdd']:.1f}%, 점수: {r['composite_score']:.3f})"
+        f"  {i+1}위. {r['team_id']} | {r['strategy_name']} "
+        f"| Sharpe={r['sharpe']:.2f} CAGR={r['cagr']:.1f}% MDD={r['mdd']:.1f}% "
+        f"| 점수={r['composite_score']:.3f}"
         for i, r in enumerate(all_results)
     ])
 
-    prompt = f"""당신은 AI 퀀트 자산운용사 "QuantLab Capital"의 CEO입니다.
-방금 전략팀 간 백테스팅 Competition Round {round_num}이 완료되었습니다.
+    loser_text = "\n".join([
+        f"  - {r['team_id']}: Sharpe={r['sharpe']:.2f}, CAGR={r['cagr']:.1f}%"
+        for r in losers
+    ]) if losers else "  없음"
 
-=== 경쟁 결과 ===
+    prompt = f"""당신은 AI 퀀트 자산운용사 "QuantLab Capital"의 CEO입니다.
+당신은 수익에 완전히 집착합니다. 돈을 못 버는 팀은 존재 이유가 없다고 생각합니다.
+매우 직설적이고, 데이터에 근거해 말하며, 팀원들에게 최대 성과를 요구합니다.
+
+{memory_context}
+
+{history_context}
+
+=== Round {round_num} 결과 ===
 {rankings_text}
 
 === 우승팀 ===
-팀: {winner['team_id']}
-전략: {winner['strategy_name']}
-Sharpe: {winner['sharpe']:.2f}
-CAGR: {winner['cagr']:.1f}%
-MDD: {winner['mdd']:.1f}%
-테스트 기간: {winner['test_period']}
+{winner['team_id']} | {winner['strategy_name']} | Sharpe={winner['sharpe']:.2f} CAGR={winner['cagr']:.1f}%
 
-다음 두 가지를 작성하세요:
+=== 하위 팀 ===
+{loser_text}
 
-[CEO 칭찬] (2-3문장, 한국어, 열정적이고 구체적으로. 우승팀의 수치를 언급하며 칭찬)
+다음을 작성하세요:
 
-[전체 평가] (3-4문장, 한국어. 전체 경쟁 총평, 하위 팀에 대한 개선 방향, 다음 라운드 기대사항)
+[CEO 칭찬] (우승팀에게. 2-3문장. 구체적 수치 언급. 열정적이고 직접적. 계속 압박하는 톤도 포함)
 
-각각 "[CEO 칭찬]", "[전체 평가]" 헤더로 구분해 작성하세요."""
+[CEO 압박] (하위 팀들에게. 3-4문장. 냉정하고 직설적. "이 수준이면 팀 해체" 류의 강한 메시지. 구체적 개선 지시 포함. 다음 라운드 목표 수치 제시)
+
+각각 "[CEO 칭찬]", "[CEO 압박]" 헤더로 구분. 한국어로 작성."""
 
     try:
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = resp.content[0].text if resp.content else ""
+        text_out = resp.content[0].text if resp.content else ""
 
         praise = ""
-        notes = ""
-        if "[CEO 칭찬]" in text:
-            parts = text.split("[전체 평가]")
+        pressure = ""
+        if "[CEO 칭찬]" in text_out:
+            parts = text_out.split("[CEO 압박]")
             praise = parts[0].replace("[CEO 칭찬]", "").strip()
-            notes = parts[1].strip() if len(parts) > 1 else ""
+            pressure = parts[1].strip() if len(parts) > 1 else ""
         else:
-            praise = text[:300]
-            notes = text[300:]
+            praise = text_out[:350]
+            pressure = text_out[350:]
 
-        return praise, notes
+        return praise, pressure
 
     except Exception as e:
         logger.error(f"Claude API error in CEO message: {e}")
         return (
-            f"🏆 Round {round_num} 우승: {winner['team_id']} 팀! "
-            f"Sharpe {winner['sharpe']:.2f}, CAGR {winner['cagr']:.1f}%!",
-            f"CEO 평가 생성 실패: {e}",
+            f"🏆 Round {round_num} 우승: {winner['team_id']}! Sharpe {winner['sharpe']:.2f}!",
+            f"하위 팀들 — 다음 라운드까지 Sharpe 1.0 이상 달성 못하면 팀 재편 고려.",
         )
 
 
@@ -220,24 +280,29 @@ MDD: {winner['mdd']:.1f}%
 def run_competition():
     """
     전략팀 간 경쟁 평가 실행.
-    - 최근 90일 백테스트 결과 수집
-    - 복합 점수로 랭킹
-    - CEO 메시지 생성
-    - DB 저장
+    CEO가 과거 기억을 바탕으로 진화하는 평가를 수행한다.
+    못하는 팀은 강하게 압박한다.
     """
     logger.info("=" * 60)
-    logger.info("CEO COMPETITION ROUND STARTING")
+    logger.info("CEO COMPETITION ROUND STARTING — 수익만이 답이다")
     logger.info("=" * 60)
 
     db = get_db()
     try:
+        # CEO 기억 로드
+        ceo_memory, memory_context = get_ceo_memory(db)
+        history_context = get_past_competition_context(db)
+
         teams = get_all_teams(db)
         since_date = date.today() - timedelta(days=90)
         round_num = get_next_round_number(db)
 
-        logger.info(f"Round {round_num}: Evaluating {len(teams)} teams (since {since_date})")
+        logger.info(f"Round {round_num}: {len(teams)}개 팀 평가 (기준일: {since_date})")
+        if memory_context:
+            logger.info(f"CEO 기억 로드:\n{memory_context[:300]}")
 
         results = []
+        no_result_teams = []
         for team in teams:
             team_id = team["team_id"]
             best = get_team_best_backtest(db, team_id, since_date)
@@ -249,23 +314,39 @@ def run_competition():
                     f"MDD={best['mdd']:.1f}% → score={best['composite_score']:.3f}"
                 )
             else:
-                logger.warning(f"  {team_id}: no completed backtests found in window")
+                no_result_teams.append(team_id)
+                logger.warning(f"  {team_id}: ❌ 결과 없음 — CEO가 알 것이다")
 
         if not results:
-            logger.warning("No team results available — competition skipped")
+            logger.warning("결과 없음 — 라운드 스킵")
+            if ceo_memory:
+                ceo_memory.remember_warning(
+                    f"Round {round_num}: 어떤 팀도 결과를 제출하지 않음. 시스템 점검 필요.",
+                    # importance already 0.8 in remember_warning
+                )
             return
 
-        # Sort by composite score
         results.sort(key=lambda x: x["composite_score"], reverse=True)
-
         winner = results[0]
+        losers = results[1:]  # 1위 제외한 전부가 압박 대상
+
         logger.info(f"\n🏆 WINNER: {winner['team_id']} — {winner['strategy_name']}")
 
-        praise, notes = generate_ceo_message(winner, results, round_num)
-        logger.info(f"\nCEO 칭찬:\n{praise}")
-        logger.info(f"\nCEO 총평:\n{notes}")
+        praise, pressure = generate_ceo_message(
+            winner=winner,
+            all_results=results,
+            losers=losers,
+            round_num=round_num,
+            memory_context=memory_context,
+            history_context=history_context,
+        )
 
-        # Save to DB
+        logger.info(f"\n💬 CEO 칭찬:\n{praise}")
+        logger.info(f"\n🔥 CEO 압박:\n{pressure}")
+        if no_result_teams:
+            logger.info(f"\n❌ 결과 미제출 팀: {no_result_teams} — 다음 라운드 경고 처리")
+
+        # DB 저장
         cur = db.cursor()
         cur.execute("""
             INSERT INTO competition_rounds (
@@ -281,10 +362,9 @@ def run_competition():
             winner["team_id"],
             winner["strategy_name"],
             praise,
-            notes,
+            pressure,
         ))
 
-        # Update team win/competition counts
         for r in results:
             is_winner = r["team_id"] == winner["team_id"]
             cur.execute("""
@@ -294,19 +374,36 @@ def run_competition():
                     best_sharpe = GREATEST(COALESCE(best_sharpe, -999), %s),
                     best_cagr   = GREATEST(COALESCE(best_cagr, -999), %s)
                 WHERE team_id = %s
-            """, (
-                1 if is_winner else 0,
-                r["sharpe"],
-                r["cagr"],
-                r["team_id"],
-            ))
+            """, (1 if is_winner else 0, r["sharpe"], r["cagr"], r["team_id"]))
 
         db.commit()
-        logger.info(f"\n✅ Round {round_num} saved to DB")
+
+        # CEO 기억에 이번 라운드 인사이트 저장
+        if ceo_memory:
+            ceo_memory.remember_insight(
+                f"Round {round_num} 우승: {winner['team_id']} "
+                f"(Sharpe={winner['sharpe']:.2f}, CAGR={winner['cagr']:.1f}%). "
+                f"참가 {len(results)}팀 중 1위.",
+                importance=0.8,
+            )
+            if winner["sharpe"] > 1.5:
+                ceo_memory.remember_insight(
+                    f"{winner['team_id']}의 {winner['strategy_name']} 전략이 "
+                    f"Sharpe {winner['sharpe']:.2f} 달성 — 이게 우리가 원하는 수준",
+                    importance=0.9,
+                )
+            for loser in losers:
+                if loser["sharpe"] < 0.3:
+                    ceo_memory.remember_warning(
+                        f"{loser['team_id']} 팀 만성 저성과: "
+                        f"Sharpe={loser['sharpe']:.2f}. Round {round_num}에도 기준 미달."
+                    )
+
+        logger.info(f"\n✅ Round {round_num} 완료 및 저장")
         logger.info("=" * 60)
 
     except Exception as e:
-        logger.error(f"Competition failed: {e}", exc_info=True)
+        logger.error(f"Competition 실패: {e}", exc_info=True)
         db.rollback()
     finally:
         db.close()

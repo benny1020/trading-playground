@@ -2,293 +2,362 @@
 
 import { useEffect, useState } from "react";
 import { api, BacktestRun, Strategy } from "@/lib/api";
-import { Card, StatCard } from "@/components/ui/Card";
-import { StatusBadge } from "@/components/ui/Badge";
-import { Table } from "@/components/ui/Table";
-import { formatDate, formatPercent } from "@/lib/utils";
-import {
-  Activity,
-  BrainCircuit,
-  BarChart2,
-  TrendingUp,
-  TrendingDown,
-  Zap,
-  Loader2,
-  CheckCircle2,
-} from "lucide-react";
 import Link from "next/link";
-import axios from "axios";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-interface MarketIndex {
-  name: string;
-  value: string;
-  change: string;
-  changePct: string;
-  positive: boolean;
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface Team {
+  team_id: string;
+  team_name: string;
+  team_type: string;
+  wins: number;
+  total_competitions: number;
+  best_sharpe: number | null;
+  best_cagr: number | null;
 }
 
-const MARKET_DATA: MarketIndex[] = [
-  { name: "KOSPI", value: "2,628.45", change: "+14.32", changePct: "+0.55%", positive: true },
-  { name: "KOSDAQ", value: "751.23", change: "-3.21", changePct: "-0.43%", positive: false },
-  { name: "S&P 500", value: "5,204.34", change: "+23.11", changePct: "+0.45%", positive: true },
-  { name: "NASDAQ", value: "16,248.52", change: "+87.44", changePct: "+0.54%", positive: true },
-];
+interface Competition {
+  round_number: number;
+  winner_team_id: string;
+  winner_strategy: string;
+  ceo_praise: string;
+  ceo_notes: string;
+  results: Array<{ team_id: string; sharpe: number; cagr: number; mdd: number; composite_score: number }>;
+  created_at: string;
+}
 
-type DiscoveryStatus = "idle" | "running" | "done" | "error";
+interface AgenticSignal {
+  market: string;
+  final_signal: string;
+  confidence: number;
+  position_size: number;
+  synthesis: string;
+  created_at: string;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const SignalDot = ({ signal }: { signal: string }) => {
+  const colors: Record<string, string> = {
+    BUY: "bg-emerald-500", OVERWEIGHT: "bg-green-400",
+    HOLD: "bg-zinc-500", UNDERWEIGHT: "bg-orange-400", SELL: "bg-red-500",
+  };
+  return <span className={`inline-block w-2 h-2 rounded-full ${colors[signal] ?? "bg-zinc-500"}`} />;
+};
+
+const SignalPill = ({ signal }: { signal: string }) => {
+  const styles: Record<string, string> = {
+    BUY: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+    OVERWEIGHT: "bg-green-500/15 text-green-400 border-green-500/30",
+    HOLD: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
+    UNDERWEIGHT: "bg-orange-500/15 text-orange-400 border-orange-500/30",
+    SELL: "bg-red-500/15 text-red-400 border-red-500/30",
+  };
+  return (
+    <span className={`text-xs font-bold px-2 py-0.5 rounded border ${styles[signal] ?? "bg-zinc-700 text-zinc-300 border-zinc-600"}`}>
+      {signal}
+    </span>
+  );
+};
+
+const typeColor: Record<string, string> = {
+  quant: "text-blue-400 bg-blue-500/10 border-blue-500/20",
+  agentic: "text-purple-400 bg-purple-500/10 border-purple-500/20",
+  hybrid: "text-teal-400 bg-teal-500/10 border-teal-500/20",
+};
+
+// ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
-  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [backtests, setBacktests] = useState<BacktestRun[]>([]);
+  const [competition, setCompetition] = useState<Competition | null>(null);
+  const [signals, setSignals] = useState<AgenticSignal[]>([]);
   const [loading, setLoading] = useState(true);
-  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus>("idle");
-  const [discoveryResult, setDiscoveryResult] = useState<{ strategies_created: number; backtests_triggered: number } | null>(null);
-
-  async function runStrategyDiscovery() {
-    setDiscoveryStatus("running");
-    setDiscoveryResult(null);
-    try {
-      const res = await axios.post(`${API_BASE}/api/research/trigger-strategy-discovery`, {
-        focus: "agentic trading, momentum, mean reversion, factor investing, machine learning trading, reinforcement learning",
-        max_papers: 30,
-        auto_backtest: true,
-      });
-      setDiscoveryStatus("done");
-      // Poll for results after 10s
-      setTimeout(async () => {
-        const [strRes, btRes] = await Promise.allSettled([api.strategies.list(), api.backtests.list()]);
-        if (strRes.status === "fulfilled") setStrategies(strRes.value.data);
-        if (btRes.status === "fulfilled") setBacktests(btRes.value.data);
-        setDiscoveryResult({ strategies_created: 0, backtests_triggered: 0 });
-      }, 10000);
-    } catch {
-      setDiscoveryStatus("error");
-    }
-  }
+  const [discoveryRunning, setDiscoveryRunning] = useState(false);
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [strRes, btRes] = await Promise.allSettled([
-          api.strategies.list(),
-          api.backtests.list(),
-        ]);
-        if (strRes.status === "fulfilled") setStrategies(strRes.value.data);
-        if (btRes.status === "fulfilled") setBacktests(btRes.value.data);
-      } catch (_) {
-      } finally {
-        setLoading(false);
-      }
-    }
-    load();
+    Promise.all([
+      fetch(`${API_BASE}/api/company/leaderboard`).then(r => r.json()).catch(() => []),
+      fetch(`${API_BASE}/api/backtests/?limit=8`).then(r => r.json()).catch(() => []),
+      fetch(`${API_BASE}/api/company/competition/latest`).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/api/company/agentic-signals?limit=6`).then(r => r.json()).catch(() => []),
+    ]).then(([t, bt, c, s]) => {
+      setTeams(Array.isArray(t) ? t : []);
+      setBacktests(Array.isArray(bt) ? bt : []);
+      setCompetition(c);
+      setSignals(Array.isArray(s) ? s : []);
+      setLoading(false);
+    });
   }, []);
 
-  const completedBacktests = backtests.filter((b) => b.status === "completed");
-  const bestSharpe = completedBacktests.length
-    ? Math.max(...completedBacktests.map((b) => b.results?.sharpe_ratio ?? 0))
-    : null;
-  const bestCAGR = completedBacktests.length
-    ? Math.max(...completedBacktests.map((b) => b.results?.cagr ?? 0))
-    : null;
+  const runDiscovery = async () => {
+    setDiscoveryRunning(true);
+    try {
+      await api.research.triggerStrategyDiscovery();
+    } finally {
+      setTimeout(() => setDiscoveryRunning(false), 3000);
+    }
+  };
 
-  const recentBacktests = [...backtests]
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 8);
-
-  const columns = [
-    {
-      key: "name",
-      header: "Name",
-      render: (row: BacktestRun) => (
-        <Link
-          href={`/backtests/${row.id}`}
-          className="text-primary hover:text-primary/80 font-medium transition-colors"
-        >
-          {row.name}
-        </Link>
-      ),
-    },
-    {
-      key: "status",
-      header: "Status",
-      render: (row: BacktestRun) => <StatusBadge status={row.status} />,
-    },
-    {
-      key: "sharpe",
-      header: "Sharpe",
-      align: "right" as const,
-      render: (row: BacktestRun) =>
-        row.results ? (
-          <span className={row.results.sharpe_ratio >= 1 ? "text-success" : "text-gray-300"}>
-            {row.results.sharpe_ratio.toFixed(2)}
-          </span>
-        ) : (
-          <span className="text-muted">-</span>
-        ),
-    },
-    {
-      key: "cagr",
-      header: "CAGR",
-      align: "right" as const,
-      render: (row: BacktestRun) =>
-        row.results ? (
-          <span className={row.results.cagr >= 0 ? "text-success" : "text-danger"}>
-            {formatPercent(row.results.cagr)}
-          </span>
-        ) : (
-          <span className="text-muted">-</span>
-        ),
-    },
-    {
-      key: "max_drawdown",
-      header: "Max DD",
-      align: "right" as const,
-      render: (row: BacktestRun) =>
-        row.results ? (
-          <span className="text-danger">
-            {formatPercent(row.results.max_drawdown)}
-          </span>
-        ) : (
-          <span className="text-muted">-</span>
-        ),
-    },
-    {
-      key: "created_at",
-      header: "Date",
-      render: (row: BacktestRun) => (
-        <span className="text-muted">{formatDate(row.created_at)}</span>
-      ),
-    },
-  ];
+  const completedBt = backtests.filter(b => b.status === "completed");
+  const avgSharpe = completedBt.length
+    ? (completedBt.reduce((s, b) => s + (b.results?.sharpe_ratio ?? 0), 0) / completedBt.length).toFixed(2)
+    : "—";
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-white">Dashboard</h1>
-          <p className="text-sm text-muted mt-0.5">
-            전략 연구 → 백테스팅 → 수익 창출 | KOSPI · KOSDAQ · US Stocks
-          </p>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      {/* ── Top Nav ──────────────────────────────────────────────────────── */}
+      <header className="border-b border-zinc-800 px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-xl">🏦</span>
+          <span className="font-bold text-lg tracking-tight">QuantLab Capital</span>
+          <span className="text-xs text-zinc-500 border border-zinc-700 rounded px-2 py-0.5">AI 퀀트 자산운용사</span>
         </div>
+        <nav className="flex items-center gap-1 text-sm">
+          {[
+            { href: "/", label: "대시보드" },
+            { href: "/company", label: "🏢 회사현황" },
+            { href: "/strategies", label: "전략" },
+            { href: "/backtests", label: "백테스트" },
+            { href: "/research", label: "리서치" },
+          ].map(n => (
+            <Link key={n.href} href={n.href}
+              className="px-3 py-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors">
+              {n.label}
+            </Link>
+          ))}
+        </nav>
+        <button
+          onClick={runDiscovery}
+          disabled={discoveryRunning}
+          className="flex items-center gap-2 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors"
+        >
+          {discoveryRunning ? "⏳ 탐색 중..." : "⚡ 전략 자동 발굴"}
+        </button>
+      </header>
 
-        {/* Strategy Discovery Button */}
-        <div className="flex flex-col items-end gap-1">
-          <button
-            onClick={runStrategyDiscovery}
-            disabled={discoveryStatus === "running"}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
-              discoveryStatus === "running"
-                ? "bg-primary/30 text-primary/60 cursor-not-allowed"
-                : discoveryStatus === "done"
-                ? "bg-success/20 text-success border border-success/40 hover:bg-success/30"
-                : discoveryStatus === "error"
-                ? "bg-danger/20 text-danger border border-danger/40 hover:bg-danger/30"
-                : "bg-primary text-white hover:bg-primary/80 shadow-lg shadow-primary/20"
-            }`}
-          >
-            {discoveryStatus === "running" ? (
-              <><Loader2 size={15} className="animate-spin" /> 리서치 중...</>
-            ) : discoveryStatus === "done" ? (
-              <><CheckCircle2 size={15} /> 완료!</>
-            ) : (
-              <><Zap size={15} /> 전략 자동 발굴</>
-            )}
-          </button>
-          <p className="text-xs text-muted">
-            {discoveryStatus === "running"
-              ? "arXiv 논문 분석 → 전략 생성 → 백테스트 실행 중..."
-              : discoveryStatus === "done"
-              ? "전략이 생성되고 백테스트가 시작됐어요"
-              : "최신 논문 리서치 후 전략 자동 생성"}
-          </p>
-        </div>
-      </div>
+      <main className="p-6 space-y-6 max-w-7xl mx-auto">
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          label="Total Strategies"
-          value={loading ? "-" : strategies.length}
-          icon={<BrainCircuit size={16} />}
-        />
-        <StatCard
-          label="Total Backtests"
-          value={loading ? "-" : backtests.length}
-          icon={<BarChart2 size={16} />}
-        />
-        <StatCard
-          label="Best Sharpe Ratio"
-          value={loading || bestSharpe === null ? "-" : bestSharpe.toFixed(2)}
-          positive={bestSharpe !== null && bestSharpe >= 1}
-          icon={<Activity size={16} />}
-        />
-        <StatCard
-          label="Best CAGR"
-          value={loading || bestCAGR === null ? "-" : formatPercent(bestCAGR)}
-          positive={bestCAGR !== null && bestCAGR >= 0}
-          negative={bestCAGR !== null && bestCAGR < 0}
-          icon={<TrendingUp size={16} />}
-        />
-      </div>
-
-      {/* Market Overview */}
-      <Card>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-gray-200 uppercase tracking-wider">
-            Market Overview
-          </h2>
-          <span className="text-xs text-muted">Placeholder data</span>
-        </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {MARKET_DATA.map((index) => (
-            <div
-              key={index.name}
-              className="bg-background rounded-lg px-4 py-3 border border-border"
-            >
-              <p className="text-xs text-muted mb-1">{index.name}</p>
-              <p className="text-base font-bold text-white">{index.value}</p>
-              <div className="flex items-center gap-1 mt-0.5">
-                {index.positive ? (
-                  <TrendingUp size={11} className="text-success" />
-                ) : (
-                  <TrendingDown size={11} className="text-danger" />
-                )}
-                <span
-                  className={`text-xs font-medium ${
-                    index.positive ? "text-success" : "text-danger"
-                  }`}
-                >
-                  {index.change} ({index.changePct})
-                </span>
-              </div>
+        {/* ── KPI Row ──────────────────────────────────────────────────── */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[
+            { label: "활성 전략팀", value: loading ? "—" : `${teams.length}팀`, icon: "👥", color: "text-blue-400" },
+            { label: "평균 Sharpe", value: loading ? "—" : avgSharpe, icon: "📊", color: "text-emerald-400" },
+            { label: "완료 백테스트", value: loading ? "—" : completedBt.length.toString(), icon: "✅", color: "text-yellow-400" },
+            { label: "최근 CEO 라운드", value: loading ? "—" : competition ? `Round ${competition.round_number}` : "없음", icon: "🏆", color: "text-orange-400" },
+          ].map(k => (
+            <div key={k.label} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+              <div className="text-2xl mb-1">{k.icon}</div>
+              <div className={`text-2xl font-black ${k.color}`}>{k.value}</div>
+              <div className="text-xs text-zinc-500 mt-0.5">{k.label}</div>
             </div>
           ))}
         </div>
-      </Card>
 
-      {/* Recent Backtests */}
-      <Card className="p-0">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <h2 className="text-sm font-semibold text-gray-200 uppercase tracking-wider">
-            Recent Backtests
-          </h2>
-          <Link
-            href="/backtests"
-            className="text-xs text-primary hover:text-primary/80 transition-colors"
-          >
-            View all
-          </Link>
+        {/* ── Main Grid ────────────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          {/* Team Performance (left 2 cols) */}
+          <div className="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold flex items-center gap-2">🥇 전략팀 성과 순위</h2>
+              <Link href="/company" className="text-xs text-zinc-500 hover:text-zinc-300">전체 보기 →</Link>
+            </div>
+            {loading ? (
+              <div className="text-zinc-600 text-center py-8">로딩 중...</div>
+            ) : teams.length === 0 ? (
+              <div className="text-zinc-600 text-center py-8">팀 데이터 없음</div>
+            ) : (
+              <div className="space-y-2">
+                {teams.map((team, i) => {
+                  const winRate = team.total_competitions > 0
+                    ? Math.round((team.wins / team.total_competitions) * 100)
+                    : 0;
+                  return (
+                    <div key={team.team_id}
+                      className="flex items-center gap-3 p-3 rounded-lg hover:bg-zinc-800/50 transition-colors">
+                      <span className={`w-7 text-center font-black text-lg shrink-0 ${
+                        i === 0 ? "text-yellow-400" : i === 1 ? "text-zinc-400" : i === 2 ? "text-orange-600" : "text-zinc-700"
+                      }`}>{i + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm truncate">{team.team_name}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded border ${typeColor[team.team_type] ?? "text-zinc-400 bg-zinc-800 border-zinc-700"}`}>
+                            {team.team_type}
+                          </span>
+                        </div>
+                        {/* Win rate bar */}
+                        <div className="flex items-center gap-2 mt-1">
+                          <div className="flex-1 bg-zinc-800 rounded-full h-1">
+                            <div className="bg-yellow-500 h-1 rounded-full" style={{ width: `${winRate}%` }} />
+                          </div>
+                          <span className="text-xs text-zinc-500 w-10 text-right">{team.wins}승</span>
+                        </div>
+                      </div>
+                      <div className="flex gap-4 shrink-0 text-right">
+                        <div>
+                          <div className="text-xs text-zinc-600">Sharpe</div>
+                          <div className={`font-bold text-sm ${
+                            (team.best_sharpe ?? 0) >= 1.0 ? "text-emerald-400"
+                            : (team.best_sharpe ?? 0) >= 0.5 ? "text-yellow-400"
+                            : "text-zinc-500"
+                          }`}>
+                            {team.best_sharpe?.toFixed(2) ?? "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-zinc-600">CAGR</div>
+                          <div className="font-bold text-sm text-blue-400">
+                            {team.best_cagr != null ? `${(team.best_cagr * 100).toFixed(1)}%` : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Agentic Signals (right col) */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold flex items-center gap-2">📡 현재 시장 신호</h2>
+              <Link href="/company?tab=signals" className="text-xs text-zinc-500 hover:text-zinc-300">더보기 →</Link>
+            </div>
+            {signals.length === 0 ? (
+              <p className="text-zinc-600 text-sm text-center py-8">신호 없음</p>
+            ) : (
+              <div className="space-y-3">
+                {signals.slice(0, 6).map((s, i) => (
+                  <div key={i} className="border border-zinc-800 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono font-bold text-zinc-300">{s.market}</span>
+                        <SignalPill signal={s.final_signal} />
+                      </div>
+                      <span className="text-xs text-zinc-600">
+                        {new Date(s.created_at).toLocaleDateString("ko-KR")}
+                      </span>
+                    </div>
+                    <div className="flex gap-3 text-xs text-zinc-500">
+                      <span>확신도 <span className="text-zinc-300 font-medium">{(s.confidence * 100).toFixed(0)}%</span></span>
+                      <span>포지션 <span className="text-zinc-300 font-medium">{(s.position_size * 100).toFixed(0)}%</span></span>
+                    </div>
+                    {s.synthesis && (
+                      <p className="text-zinc-500 text-xs mt-1.5 leading-relaxed line-clamp-2">
+                        {s.synthesis}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-        <Table
-          columns={columns}
-          data={recentBacktests}
-          emptyMessage={
-            loading ? "Loading..." : "No backtests found. Create your first backtest."
-          }
-        />
-      </Card>
+
+        {/* ── CEO Message + Recent Backtests ───────────────────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* CEO Latest */}
+          {competition && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold">🏆 CEO 최근 평가 — Round {competition.round_number}</h2>
+                <Link href="/company" className="text-xs text-zinc-500 hover:text-zinc-300">경쟁 히스토리 →</Link>
+              </div>
+              {/* Top 3 results */}
+              {Array.isArray(competition.results) && competition.results.length > 0 && (
+                <div className="space-y-1">
+                  {competition.results.slice(0, 3).map((r, i) => (
+                    <div key={r.team_id} className="flex items-center gap-2 text-sm">
+                      <span className={`w-5 font-black ${i === 0 ? "text-yellow-400" : "text-zinc-600"}`}>{i + 1}</span>
+                      <span className="font-medium flex-1 truncate">{r.team_id}</span>
+                      <span className="text-emerald-400 font-mono text-xs">S {r.sharpe?.toFixed(2)}</span>
+                      <span className="text-blue-400 font-mono text-xs">{r.cagr?.toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="border-t border-zinc-800 pt-3 space-y-2">
+                {competition.ceo_praise && (
+                  <div>
+                    <div className="text-xs text-yellow-500 mb-1">💬 칭찬</div>
+                    <p className="text-zinc-300 text-xs leading-relaxed">{competition.ceo_praise.slice(0, 200)}</p>
+                  </div>
+                )}
+                {competition.ceo_notes && (
+                  <div>
+                    <div className="text-xs text-red-400 mb-1">🔥 압박</div>
+                    <p className="text-zinc-400 text-xs leading-relaxed">{competition.ceo_notes.slice(0, 150)}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Recent Backtests */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold">⚡ 최근 백테스트</h2>
+              <Link href="/backtests" className="text-xs text-zinc-500 hover:text-zinc-300">전체 보기 →</Link>
+            </div>
+            <div className="space-y-2">
+              {backtests.slice(0, 6).map(bt => {
+                const sharpe = bt.results?.sharpe_ratio ?? null;
+                const cagr = bt.results?.cagr ?? null;
+                return (
+                  <Link key={bt.id} href={`/backtests/${bt.id}`}
+                    className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-zinc-800/50 transition-colors group">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${
+                      bt.status === "completed" ? "bg-emerald-500"
+                      : bt.status === "running" ? "bg-yellow-500 animate-pulse"
+                      : bt.status === "failed" ? "bg-red-500"
+                      : "bg-zinc-600"
+                    }`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate group-hover:text-white transition-colors">
+                        {bt.name}
+                      </div>
+                      <div className="text-xs text-zinc-500">
+                        {bt.market} · {new Date(bt.created_at).toLocaleDateString("ko-KR")}
+                      </div>
+                    </div>
+                    {bt.status === "completed" && sharpe != null && (
+                      <div className="flex gap-3 shrink-0 text-right">
+                        <div>
+                          <div className="text-xs text-zinc-600">Sharpe</div>
+                          <div className={`text-xs font-bold ${sharpe >= 1 ? "text-emerald-400" : sharpe >= 0.5 ? "text-yellow-400" : "text-red-400"}`}>
+                            {sharpe.toFixed(2)}
+                          </div>
+                        </div>
+                        {cagr != null && (
+                          <div>
+                            <div className="text-xs text-zinc-600">CAGR</div>
+                            <div className={`text-xs font-bold ${cagr > 0 ? "text-blue-400" : "text-red-400"}`}>
+                              {(cagr * 100).toFixed(1)}%
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {bt.status !== "completed" && (
+                      <span className="text-xs text-zinc-500 shrink-0 capitalize">{bt.status}</span>
+                    )}
+                  </Link>
+                );
+              })}
+              {backtests.length === 0 && (
+                <p className="text-zinc-600 text-sm text-center py-6">백테스트 없음</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+      </main>
     </div>
   );
 }

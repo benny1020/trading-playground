@@ -249,54 +249,149 @@ JSON만 반환:
 
 
 class TechnicalAnalyst:
-    """기술적 분석: RSI, MACD, 이동평균, 볼린저밴드"""
+    """
+    기술적 분석 — 5전략 앙상블 (ai-hedge-fund 방식)
+    Trend(25%) + MeanReversion(20%) + Momentum(25%) + Volatility(15%) + StatArb(15%)
+    """
     name = "Technical Analyst"
+
+    STRATEGY_WEIGHTS = {
+        "trend": 0.25,
+        "mean_reversion": 0.20,
+        "momentum": 0.25,
+        "volatility": 0.15,
+        "stat_arb": 0.15,
+    }
 
     def analyze(self, market: str, symbols: list, claude_client=None) -> AnalystReport:
         try:
             import FinanceDataReader as fdr
             import pandas as pd
+            import numpy as np
 
             idx_map = {"KOSPI": "KS11", "KOSDAQ": "KQ11", "US": "^GSPC"}
             symbol = idx_map.get(market, "^GSPC")
-            df = fdr.DataReader(symbol, datetime.now() - timedelta(days=300))
+            df = fdr.DataReader(symbol, datetime.now() - timedelta(days=400))
             if len(df) < 60:
                 return AnalystReport(self.name, "NEUTRAL", 0.4, "데이터 부족")
 
             close = df["Close"]
-            ma20 = close.rolling(20).mean().iloc[-1]
-            ma60 = close.rolling(60).mean().iloc[-1]
+            price = float(close.iloc[-1])
+            daily_ret = close.pct_change().dropna()
+
+            # ── Strategy 1: Trend (EMA crossover + ADX proxy) ──────────
+            ema8 = close.ewm(span=8).mean().iloc[-1]
+            ema21 = close.ewm(span=21).mean().iloc[-1]
+            ema55 = close.ewm(span=55).mean().iloc[-1]
             ma200 = close.rolling(min(200, len(close))).mean().iloc[-1]
-            price = close.iloc[-1]
 
+            trend_score = 0
+            if price > ema8 > ema21 > ema55: trend_score = 1.0   # Strong uptrend
+            elif price > ema21 > ema55: trend_score = 0.5
+            elif price < ema8 < ema21 < ema55: trend_score = -1.0  # Strong downtrend
+            elif price < ema21 < ema55: trend_score = -0.5
+            if price > ma200: trend_score += 0.3
+            elif price < ma200: trend_score -= 0.3
+            trend_signal = "BULLISH" if trend_score > 0.3 else "BEARISH" if trend_score < -0.3 else "NEUTRAL"
+
+            # ── Strategy 2: Mean Reversion (Z-score + BB + RSI) ────────
             delta = close.diff()
-            gain = delta.where(delta>0,0).rolling(14).mean()
-            loss = (-delta.where(delta<0,0)).rolling(14).mean()
-            rsi = float((100 - 100/(1+gain/loss)).iloc[-1])
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi = float((100 - 100 / (1 + gain / (loss + 1e-10))).iloc[-1])
 
+            bb_mid = close.rolling(20).mean().iloc[-1]
+            bb_std = close.rolling(20).std().iloc[-1]
+            bb_upper = bb_mid + 2 * bb_std
+            bb_lower = bb_mid - 2 * bb_std
+            bb_pct = float((price - bb_lower) / (bb_upper - bb_lower + 1e-10))
+
+            z_20 = float((price - close.rolling(20).mean().iloc[-1]) / (close.rolling(20).std().iloc[-1] + 1e-10))
+
+            mr_score = 0
+            if z_20 < -2 and bb_pct < 0.2: mr_score = 1.0      # 극단적 과매도
+            elif rsi < 30 and bb_pct < 0.3: mr_score = 0.7
+            elif z_20 > 2 and bb_pct > 0.8: mr_score = -1.0     # 극단적 과매수
+            elif rsi > 75 and bb_pct > 0.7: mr_score = -0.7
+            mr_signal = "BULLISH" if mr_score > 0.3 else "BEARISH" if mr_score < -0.3 else "NEUTRAL"
+
+            # ── Strategy 3: Momentum (1m/3m/6m 가중) ───────────────────
+            ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1) if len(close) >= 21 else 0
+            ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1) if len(close) >= 63 else 0
+            ret_6m = float(close.iloc[-1] / close.iloc[-126] - 1) if len(close) >= 126 else 0
+
+            vol_ratio = float(daily_ret.tail(5).mean() / (daily_ret.tail(20).mean() + 1e-10)) if len(daily_ret) >= 20 else 1.0
+            mom_score = ret_1m * 0.4 + ret_3m * 0.3 + ret_6m * 0.3
+            if vol_ratio > 1.5: mom_score *= 1.2  # 거래량 확인 대리 지표
+            mom_signal = "BULLISH" if mom_score > 0.03 else "BEARISH" if mom_score < -0.03 else "NEUTRAL"
+
+            # ── Strategy 4: Volatility Regime ──────────────────────────
+            vol_20 = float(daily_ret.tail(20).std()) if len(daily_ret) >= 20 else 0.02
+            vol_60 = float(daily_ret.tail(60).std()) if len(daily_ret) >= 60 else 0.02
+            vol_ratio_regime = vol_20 / (vol_60 + 1e-10)
+            vol_z = float((vol_20 - daily_ret.rolling(60).std().mean()) / (daily_ret.rolling(60).std().std() + 1e-10)) if len(daily_ret) >= 60 else 0
+
+            vol_score = 0
+            if vol_ratio_regime < 0.8 and vol_z < -1: vol_score = 0.5    # 저변동성 → 확장 기대
+            elif vol_ratio_regime > 1.5 and vol_z > 1: vol_score = -0.5  # 고변동성 → 수축 기대
+            vol_signal = "BULLISH" if vol_score > 0.2 else "BEARISH" if vol_score < -0.2 else "NEUTRAL"
+
+            # ── Strategy 5: Stat Arb (Hurst proxy + skewness) ──────────
+            recent_ret = daily_ret.tail(60)
+            hurst_proxy = float(np.log(recent_ret.std() * np.sqrt(60)) / np.log(60)) if len(recent_ret) >= 60 else 0.5
+            skewness = float(recent_ret.skew()) if len(recent_ret) >= 20 else 0
+
+            sa_score = 0
+            if hurst_proxy < 0.4 and skewness > 0: sa_score = 0.5    # Mean reverting + positive skew
+            elif hurst_proxy > 0.6 and skewness > 0: sa_score = 0.3  # Trending + positive skew
+            elif hurst_proxy > 0.6 and skewness < -0.5: sa_score = -0.5  # Trending + negative skew
+            sa_signal = "BULLISH" if sa_score > 0.2 else "BEARISH" if sa_score < -0.2 else "NEUTRAL"
+
+            # ── Ensemble: 가중 합산 ────────────────────────────────────
+            signal_values = {"BULLISH": 1, "NEUTRAL": 0, "BEARISH": -1}
+            sub_signals = {
+                "trend": (trend_signal, max(0.5, abs(trend_score))),
+                "mean_reversion": (mr_signal, max(0.5, abs(mr_score))),
+                "momentum": (mom_signal, max(0.5, abs(mom_score) * 10)),
+                "volatility": (vol_signal, max(0.5, abs(vol_score))),
+                "stat_arb": (sa_signal, max(0.5, abs(sa_score))),
+            }
+
+            weighted_sum = 0.0
+            total_conf_w = 0.0
+            for strat, (sig, conf) in sub_signals.items():
+                w = self.STRATEGY_WEIGHTS[strat]
+                weighted_sum += signal_values[sig] * w * conf
+                total_conf_w += w * conf
+
+            final_score = weighted_sum / (total_conf_w + 1e-10)
+            ensemble_signal = "BULLISH" if final_score > 0.2 else "BEARISH" if final_score < -0.2 else "NEUTRAL"
+            ensemble_confidence = min(0.95, 0.5 + abs(final_score) * 0.5)
+
+            # ── MACD (보조) ────────────────────────────────────────────
             ema12 = close.ewm(span=12).mean()
             ema26 = close.ewm(span=26).mean()
             macd = ema12 - ema26
             signal_line = macd.ewm(span=9).mean()
             macd_hist = float((macd - signal_line).iloc[-1])
 
-            bb_mid = close.rolling(20).mean().iloc[-1]
-            bb_std = close.rolling(20).std().iloc[-1]
-            bb_upper = bb_mid + 2*bb_std
-            bb_lower = bb_mid - 2*bb_std
-            bb_pct = float((price - bb_lower) / (bb_upper - bb_lower))
+            report = (
+                f"[5-Strategy Ensemble] → {ensemble_signal} (score={final_score:.3f})\n"
+                f"  Trend: {trend_signal} (EMA8>21>55={'Y' if price>ema8>ema21 else 'N'}, >MA200={'Y' if price>ma200 else 'N'})\n"
+                f"  MeanRev: {mr_signal} (RSI={rsi:.0f}, BB%={bb_pct*100:.0f}%, Z={z_20:.1f})\n"
+                f"  Momentum: {mom_signal} (1m={ret_1m*100:.1f}%, 3m={ret_3m*100:.1f}%, 6m={ret_6m*100:.1f}%)\n"
+                f"  VolRegime: {vol_signal} (20d/60d={vol_ratio_regime:.2f})\n"
+                f"  StatArb: {sa_signal} (Hurst~{hurst_proxy:.2f}, Skew={skewness:.2f})\n"
+                f"  MACD히스토: {'▲' if macd_hist>0 else '▼'}{abs(macd_hist):.2f}"
+            )
 
-            score = 0
-            if price > ma20: score += 1
-            if price > ma60: score += 1
-            if price > ma200: score += 1
-            if ma20 > ma60: score += 1
-            if 40 < rsi < 65: score += 1
-            if rsi < 30: score += 2
-            if rsi > 75: score -= 2
-            if macd_hist > 0: score += 1
-            if bb_pct < 0.2: score += 1
-            if bb_pct > 0.9: score -= 1
+            return AnalystReport(
+                self.name, ensemble_signal, ensemble_confidence, report,
+                {"ensemble_score": final_score, "rsi": rsi, "macd_hist": macd_hist,
+                 "bb_pct": bb_pct, "sub_signals": {k: v[0] for k, v in sub_signals.items()}}
+            )
+        except Exception as e:
+            return AnalystReport(self.name, "NEUTRAL", 0.3, f"기술 분석 오류: {e}")
 
             report = (
                 f"가격 vs MA20={((price/ma20-1)*100):.1f}%, MA60={((price/ma60-1)*100):.1f}%, MA200={((price/ma200-1)*100):.1f}%\n"
@@ -485,7 +580,7 @@ class PortfolioManager:
         self.claude = claude_client
 
     def decide(self, analyst_reports: list, bull_case: str, bear_case: str,
-               risk_verdict: str, market: str) -> FinalDecision:
+               risk_verdict: str, market: str, extra_context: str = "") -> FinalDecision:
 
         # Weighted vote (fallback)
         weights = {

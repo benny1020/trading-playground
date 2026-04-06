@@ -376,6 +376,62 @@ services:
       - quant-net
 
   # ============================================================
+  # TRADING AGENTS TEAM
+  # Debate-Driven: Bull ↔ Bear (2 rounds) → Risk Panel → Trader
+  # ============================================================
+
+  trading-agents-team:
+    build:
+      context: ./services/trading-agents-team
+      dockerfile: Dockerfile
+    container_name: quant_trading_agents
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BACKEND_URL: http://backend:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./services/trading-agents-team:/app
+      - ./services/shared:/app/shared
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
+  # AI HEDGE FUND TEAM
+  # 8 Legendary Investor Personas: Graham/Buffett/Munger/Soros/Lynch/Burry/C.Wood/Taleb
+  # ============================================================
+
+  ai-hedge-fund-team:
+    build:
+      context: ./services/ai-hedge-fund-team
+      dockerfile: Dockerfile
+    container_name: quant_ai_hedge_fund
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quantpass}@postgres:5432/${POSTGRES_DB:-quantdb}
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BACKEND_URL: http://backend:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./services/ai-hedge-fund-team:/app
+      - ./services/shared:/app/shared
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - quant-net
+
+  # ============================================================
   # CEO AGENT
   # 전략팀 경쟁 평가 + 승자 칭찬. 매주 금요일 17시 실행
   # ============================================================
